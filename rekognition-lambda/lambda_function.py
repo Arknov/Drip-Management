@@ -165,40 +165,27 @@ def merge_duplicates(items):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def enrich(items, labels):
-    found_colors    = []
-    found_materials = []
-    found_fit       = []
-    found_style     = []
-    found_patterns  = []
 
     for l in labels:
         name = l["Name"]
-        if name in COLOR_NAMES and name not in found_colors:
-            found_colors.append(name)
-        if name in MATERIALS and name not in found_materials:
-            found_materials.append(name)
-        if name in FIT_LABELS and name not in found_fit:
-            found_fit.append(name)
-        if name in STYLE_LABELS and name not in found_style:
-            found_style.append(name)
-        if name in PATTERNS and name not in found_patterns:
-            found_patterns.append(name)
 
-    for item in items:
-        item_type = item["itemType"]
+        for i in items:
 
-        item["colors"] = found_colors.copy()
+            if name in {"Black","White","Blue","Grey","Gray","Brown","Navy","Red","Green"}:
+                if name not in i["colors"]:
+                    i["colors"].append(name)
 
-        # Denim → only apply to bottoms
-        for m in found_materials:
-            if m == "Denim" and item_type not in BOTTOMS:
-                continue
-            if m not in item["materials"]:
-                item["materials"].append(m)
+            if name in {"Denim","Cotton","Leather","Silk","Wool","Linen"}:
+                i["materials"].append(name)
 
-        item["fit"]      = found_fit.copy()
-        item["style"]    = found_style.copy()
-        item["patterns"] = found_patterns.copy()
+            if name in {"Slim","Loose","Oversized","Fitted","Baggy"}:
+                i["fit"].append(name)
+
+            if name in {"Casual","Formal","Streetwear","Business","Elegant"}:
+                i["style"].append(name)
+
+            if name in {"Striped","Plaid","Floral","Solid","Printed"}:
+                i["patterns"].append(name)
 
     return items
 
@@ -311,21 +298,15 @@ def lambda_handler(event, context):
         labels      = response.get("Labels", [])
         image_props = response.get("ImageProperties", {})
 
-        logger.info(f"Rekognition returned {len(labels)} labels")
+        # pipeline
+        items = extract_items(labels)
+        items = enrich(items, labels)
 
         # Pipeline
         items   = extract_items(labels)
         items   = enrich(items, labels)
         summary = build_summary(items)
-        colors  = extract_colors(image_props)
-
-        # Merge image-level colors into summary
-        for c in colors:
-            if c not in summary["colors"]:
-                summary["colors"].append(c)
-
-        confidence = max([i["confidence"] for i in items], default=0.0)
-        status     = "success" if items else "no_clothing"
+        colors = extract_colors(image_props)
 
         result = {
             "itemId":        item_id,

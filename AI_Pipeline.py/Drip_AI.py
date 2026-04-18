@@ -14,6 +14,19 @@ MODEL_ID = "gemini-1.5-flash"
 # -----------------------------
 # 1. NORMALIZE INPUT
 # -----------------------------
+
+def convert_lambda_items(lambda_result: dict) -> list:
+    """Converts lambda_handler output into dynamo_items format for generate_outfits"""
+    dynamo_items = []
+
+    for item in lambda_result.get("detectedItems", []):
+        item_type = item.get("itemType", "unknown")
+        colors = item.get("colors", [])
+        color = colors[0].lower() if colors else "unknown"
+        dynamo_items.append([item_type, color])
+
+    return dynamo_items
+
 def normalize_wardrobe(dynamo_items: list) -> list:
     normalized = []
 
@@ -115,7 +128,8 @@ def validate_outfits(outfits: list, items: list) -> list:
     valid_ids   = {item["item_id"] for item in items}
     type_lookup = {item["item_id"]: item["type"] for item in items}
 
-    TOPS    = {"shirt", "top", "blouse", "sweater", "hoodie", "jacket", "coat"}
+    TOPS = {"shirt", "t-shirt", "top", "blouse", "sweater", "hoodie",
+            "jacket", "coat", "tank top", "sweatshirt", "cardigan", "blazer"}
     BOTTOMS = {"pants", "jeans", "trousers", "shorts", "skirt", "dress", "bottom"}
 
     cleaned = []
@@ -164,3 +178,9 @@ def generate_outfits(dynamo_items: list, preferences: dict) -> list:
     except Exception as e:
         logger.error(f"Pipeline failed: {e}")
         return []
+
+
+def run_pipeline(lambda_result: dict, preferences: dict) -> list:
+    """Single entry point — takes raw lambda output, returns outfits"""
+    dynamo_items = convert_lambda_items(lambda_result)
+    return generate_outfits(dynamo_items, preferences)
