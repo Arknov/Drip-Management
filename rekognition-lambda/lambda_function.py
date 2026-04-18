@@ -155,26 +155,23 @@ def merge(items):
 # ATTRIBUTE ENRICHMENT
 # ─────────────────────────────
 
-def enrich(items, labels):
+def enrich(items, labels, dominant_colors=None):
+    COLOR_KEYWORDS = {"Black","White","Blue","Grey","Gray","Brown","Navy","Red","Green"}
+    detected_colors = [l["Name"] for l in labels if l["Name"] in COLOR_KEYWORDS]
 
-    for l in labels:
-        name = l["Name"]
+    for i in items:
+        # Only assign first detected color, not all of them
+        if detected_colors and not i["colors"]:
+            i["colors"].append(detected_colors[0])
 
-        for i in items:
-
-            if name in {"Black","White","Blue","Grey","Gray","Brown","Navy","Red","Green"}:
-                if name not in i["colors"]:
-                    i["colors"].append(name)
-
+        for l in labels:
+            name = l["Name"]
             if name in {"Denim","Cotton","Leather","Silk","Wool","Linen"}:
                 i["materials"].append(name)
-
             if name in {"Slim","Loose","Oversized","Fitted","Baggy"}:
                 i["fit"].append(name)
-
             if name in {"Casual","Formal","Streetwear","Business","Elegant"}:
                 i["style"].append(name)
-
             if name in {"Striped","Plaid","Floral","Solid","Printed"}:
                 i["patterns"].append(name)
 
@@ -221,10 +218,11 @@ def lambda_handler(event, context):
 
         # pipeline
         items = extract_items(labels)
-        items = enrich(items, labels)
+        colors = extract_colors(image_props)
+        items = enrich(items, labels, colors)
 
         summary = build_summary(items)
-        colors = extract_colors(image_props)
+        
 
         result = {
             "itemId": item_id,
