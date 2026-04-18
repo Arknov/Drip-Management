@@ -2,242 +2,347 @@ import json
 import boto3
 import uuid
 import os
+import logging
+from decimal import Decimal
 from datetime import datetime
 
-rekognition = boto3.client("rekognition")
-s3 = boto3.client("s3")
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-# ─────────────────────────────
-# NORMALIZATION
-# ─────────────────────────────
+# ── ENV ───────────────────────────────────────────────────────────────────────
+AWS_REGION     = os.environ.get("AWS_REGION_NAME", "us-west-2")
+WARDROBE_TABLE = os.environ["WARDROBE_TABLE_NAME"]
+
+# ── CLIENTS ───────────────────────────────────────────────────────────────────
+rekognition = boto3.client("rekognition", region_name=AWS_REGION)
+s3          = boto3.client("s3",          region_name=AWS_REGION)
+dynamodb    = boto3.resource("dynamodb",  region_name=AWS_REGION)
+table       = dynamodb.Table(WARDROBE_TABLE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAXONOMY
+# ─────────────────────────────────────────────────────────────────────────────
 
 NORMALIZATION_MAP = {
-    "Jeans": "Pants",
+    "Jeans":    "Pants",
     "Trousers": "Pants",
-    "Sneaker": "Shoes",
-    "Boot": "Shoes",
-    "Heel": "Shoes",
-    "Loafer": "Shoes"
+    "Sneaker":  "Shoes",
+    "Boot":     "Shoes",
+    "Heel":     "Shoes",
+    "Loafer":   "Shoes",
 }
 
-TOPS = {
-    "Shirt","T-Shirt","Blouse","Top","Tank Top",
-    "Sweater","Hoodie","Sweatshirt","Cardigan","Jacket","Blazer"
+BOTTOMS     = {"Pants", "Shorts", "Skirt", "Leggings"}
+SHOES       = {"Shoes"}
+ACCESSORIES = {"Bag", "Handbag", "Backpack", "Purse", "Belt", "Hat", "Cap", "Scarf", "Tie"}
+NOISE       = {
+    "Person", "Human", "Body", "Room", "Background", "Furniture", "Clothing",
+    "Sleeve", "Pedestrian", "Adult", "Man", "Woman", "Male", "Female",
 }
 
-BOTTOMS = {"Pants","Shorts","Skirt","Leggings"}
-SHOES = {"Shoes"}
+COLOR_NAMES  = {
+    "Black", "White", "Blue", "Grey", "Gray", "Brown", "Navy",
+    "Red", "Green", "Yellow", "Orange", "Pink", "Purple", "Beige",
+    "Cream", "Khaki", "Olive", "Teal", "Maroon", "Coral",
+}
+MATERIALS    = {
+    "Denim", "Cotton", "Leather", "Silk", "Wool", "Linen",
+    "Polyester", "Nylon", "Velvet", "Suede", "Fleece", "Knit",
+}
+FIT_LABELS   = {"Slim", "Loose", "Oversized", "Fitted", "Baggy", "Skinny", "Relaxed"}
+STYLE_LABELS = {"Casual", "Formal", "Streetwear", "Business", "Elegant", "Athletic", "Vintage", "Preppy"}
+PATTERNS     = {"Striped", "Plaid", "Floral", "Solid", "Printed", "Checkered", "Camouflage", "Graphic"}
 
-ACCESSORIES = {"Bag","Handbag","Backpack","Purse","Belt","Hat","Cap","Scarf","Tie"}
-
-NOISE = {"Person","Human","Body","Room","Background","Furniture","Clothing"}
-
-# ─────────────────────────────
-# REKOGNITION
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# REKOGNITION CALLS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def detect(bucket, key):
     return rekognition.detect_labels(
         Image={"S3Object": {"Bucket": bucket, "Name": key}},
         MaxLabels=50,
         MinConfidence=50,
-        Features=["GENERAL_LABELS", "IMAGE_PROPERTIES"]
+        Features=["GENERAL_LABELS", "IMAGE_PROPERTIES"],
     )
 
 def detect_moderation(bucket, key):
     return rekognition.detect_moderation_labels(
         Image={"S3Object": {"Bucket": bucket, "Name": key}},
-        MinConfidence=60
+        MinConfidence=60,
     )
 
-# ─────────────────────────────
-# TOP CLASSIFICATION (CORE FIX)
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# TOP CLASSIFICATION
+# ─────────────────────────────────────────────────────────────────────────────
 
 def classify_top(labels):
     names = {l["Name"].lower() for l in labels}
 
     if "t-shirt" in names or "tee" in names:
         return "T-Shirt"
-
     if "hoodie" in names:
         return "Hoodie"
-
     if "sweater" in names or "knit" in names:
         return "Sweater"
-
     if "blouse" in names:
         return "Blouse"
-
-    if "shirt" in names:
+    if "jacket" in names or "blazer" in names:
+        return "Jacket"
+    if "shirt" in names or "collar" in names:
         return "Shirt"
-
-    if "collar" in names:
-        return "Shirt"
-
     return None
 
-# ─────────────────────────────
-# COLORS
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# COLOR EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
 
 def extract_colors(image_props):
+    """Full-image dominant colors — used as fallback on the summary."""
     colors = []
     for c in image_props.get("DominantColors", []):
         if c["PixelPercent"] > 5:
-            colors.append(c["SimplifiedColor"])
-    return list(set(colors))
+            simplified = c["SimplifiedColor"].title()  # normalize to Title Case
+            if simplified not in colors:
+                colors.append(simplified)
+    return colors
 
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # ITEM EXTRACTION
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def extract_items(labels):
-
     items = []
 
-    # ── BOTTOMS + SHOES + ACCESSORIES ──
     for l in labels:
         name = l["Name"]
         conf = l["Confidence"]
 
-        if name in NOISE:
+        if name in NOISE or conf < 55:
             continue
 
         name = NORMALIZATION_MAP.get(name, name)
 
-        if conf < 55:
-            continue
-
         if name in BOTTOMS or name in SHOES or name in ACCESSORIES:
             items.append({
-                "itemType": name,
+                "itemType":  name,
                 "confidence": round(conf, 1),
-                "colors": [],
+                "colors":    [],
                 "materials": [],
-                "fit": [],
-                "style": [],
-                "patterns": []
+                "fit":       [],
+                "style":     [],
+                "patterns":  [],
             })
 
-    # ── TOP INFERENCE (IMPORTANT FIX) ──
+    # Tops — inferred since Rekognition is weak on top classification
     top = classify_top(labels)
-
     if top:
         items.append({
-            "itemType": top,
+            "itemType":  top,
             "confidence": 70.0,
-            "colors": [],
+            "colors":    [],
             "materials": [],
-            "fit": [],
-            "style": [],
-            "patterns": []
+            "fit":       [],
+            "style":     [],
+            "patterns":  [],
         })
 
-    return merge(items)
+    return merge_duplicates(items)
 
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # MERGE DUPLICATES
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-def merge(items):
+def merge_duplicates(items):
     best = {}
-
-    for i in items:
-        key = i["itemType"]
-
-        if key not in best or i["confidence"] > best[key]["confidence"]:
-            best[key] = i
-
+    for item in items:
+        key = item["itemType"]
+        if key not in best or item["confidence"] > best[key]["confidence"]:
+            best[key] = item
     return list(best.values())
 
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # ATTRIBUTE ENRICHMENT
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def enrich(items, labels):
+    found_colors    = []
+    found_materials = []
+    found_fit       = []
+    found_style     = []
+    found_patterns  = []
 
     for l in labels:
         name = l["Name"]
+        if name in COLOR_NAMES and name not in found_colors:
+            found_colors.append(name)
+        if name in MATERIALS and name not in found_materials:
+            found_materials.append(name)
+        if name in FIT_LABELS and name not in found_fit:
+            found_fit.append(name)
+        if name in STYLE_LABELS and name not in found_style:
+            found_style.append(name)
+        if name in PATTERNS and name not in found_patterns:
+            found_patterns.append(name)
 
-        for i in items:
+    for item in items:
+        item_type = item["itemType"]
 
-            if name in {"Black","White","Blue","Grey","Gray","Brown","Navy","Red","Green"}:
-                if name not in i["colors"]:
-                    i["colors"].append(name)
+        item["colors"] = found_colors.copy()
 
-            if name in {"Denim","Cotton","Leather","Silk","Wool","Linen"}:
-                i["materials"].append(name)
+        # Denim → only apply to bottoms
+        for m in found_materials:
+            if m == "Denim" and item_type not in BOTTOMS:
+                continue
+            if m not in item["materials"]:
+                item["materials"].append(m)
 
-            if name in {"Slim","Loose","Oversized","Fitted","Baggy"}:
-                i["fit"].append(name)
-
-            if name in {"Casual","Formal","Streetwear","Business","Elegant"}:
-                i["style"].append(name)
-
-            if name in {"Striped","Plaid","Floral","Solid","Printed"}:
-                i["patterns"].append(name)
+        item["fit"]      = found_fit.copy()
+        item["style"]    = found_style.copy()
+        item["patterns"] = found_patterns.copy()
 
     return items
 
-# ─────────────────────────────
-# SUMMARY OUTPUT
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_summary(items):
-
     return {
         "itemTypes": list({i["itemType"] for i in items}),
-        "colors": list({c for i in items for c in i["colors"]}),
+        "colors":    list({c for i in items for c in i["colors"]}),
         "materials": list({m for i in items for m in i["materials"]}),
-        "fit": list({f for i in items for f in i["fit"]}),
-        "style": list({s for i in items for s in i["style"]}),
-        "patterns": list({p for i in items for p in i["patterns"]}),
+        "fit":       list({f for i in items for f in i["fit"]}),
+        "style":     list({s for i in items for s in i["style"]}),
+        "patterns":  list({p for i in items for p in i["patterns"]}),
     }
 
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# DYNAMO WRITE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def floats_to_decimal(obj):
+    """Recursively convert all floats to Decimal for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, list):
+        return [floats_to_decimal(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: floats_to_decimal(v) for k, v in obj.items()}
+    return obj
+
+
+def write_to_dynamo(user_id, result):
+    try:
+        table.put_item(Item={
+            "userId":        user_id,
+            "itemId":        result["itemId"],
+            "imageUrl":      result["imageUrl"],
+            "cleanedLabels": floats_to_decimal(result["cleanedLabels"]),
+            "detectedItems": floats_to_decimal(result["detectedItems"]),
+            "confidence":    str(result["confidence"]),
+            "status":        result["status"],
+            "processedAt":   result["processedAt"],
+        })
+        logger.info(f"Wrote item {result['itemId']} for user {user_id} to DynamoDB")
+    except Exception as e:
+        logger.error(f"DynamoDB write failed: {e}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EVENT PARSER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_s3_event(event):
+    from urllib.parse import unquote_plus
+
+    for record in event.get("Records", []):
+
+        # Format 1: Direct S3 event (Lambda console test)
+        if record.get("eventSource") == "aws:s3" or "s3" in record:
+            bucket = record["s3"]["bucket"]["name"]
+            key    = unquote_plus(record["s3"]["object"]["key"])
+            return bucket, key
+
+        # Format 2: SQS → (SNS →) S3
+        if "body" in record:
+            try:
+                body = json.loads(record["body"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if "Message" in body:
+                try:
+                    body = json.loads(body["Message"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            for s3_record in body.get("Records", []):
+                if s3_record.get("eventSource") == "aws:s3" or "s3" in s3_record:
+                    bucket = s3_record["s3"]["bucket"]["name"]
+                    key    = unquote_plus(s3_record["s3"]["object"]["key"])
+                    return bucket, key
+
+    raise ValueError(f"Could not parse S3 event: {json.dumps(event)[:500]}")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN HANDLER
-# ─────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
-
     item_id = str(uuid.uuid4())
 
     try:
-        record = event["Records"][0]
-        bucket = record["s3"]["bucket"]["name"]
-        key = record["s3"]["object"]["key"]
+        bucket, key = parse_s3_event(event)
 
-        # moderation
+        # Extract userId from key: wardrobe/{userId}/{filename}
+        key_parts = key.split("/")
+        user_id   = key_parts[1] if len(key_parts) >= 2 else "unknown"
+        image_url = f"s3://{bucket}/{key}"
+
+        logger.info(f"Processing {image_url} for user {user_id}")
+
+        # Moderation check
         mod = detect_moderation(bucket, key)
         if mod.get("ModerationLabels"):
+            logger.warning(f"Moderation flag on {key}")
             return {"status": "error", "reason": "unsafe image"}
 
-        # rekognition
-        response = detect(bucket, key)
-
-        labels = response.get("Labels", [])
+        # Rekognition
+        response    = detect(bucket, key)
+        labels      = response.get("Labels", [])
         image_props = response.get("ImageProperties", {})
 
-        # pipeline
-        items = extract_items(labels)
-        items = enrich(items, labels)
+        logger.info(f"Rekognition returned {len(labels)} labels")
 
+        # Pipeline
+        items   = extract_items(labels)
+        items   = enrich(items, labels)
         summary = build_summary(items)
-        colors = extract_colors(image_props)
+        colors  = extract_colors(image_props)
+
+        # Merge image-level colors into summary
+        for c in colors:
+            if c not in summary["colors"]:
+                summary["colors"].append(c)
+
+        confidence = max([i["confidence"] for i in items], default=0.0)
+        status     = "success" if items else "no_clothing"
 
         result = {
-            "itemId": item_id,
-            "image": f"s3://{bucket}/{key}",
+            "itemId":        item_id,
+            "imageUrl":      image_url,
             "detectedItems": items,
             "cleanedLabels": summary,
-            "colors": colors,
-            "confidence": max([i["confidence"] for i in items], default=0),
-            "status": "success",
-            "processedAt": datetime.utcnow().isoformat()
+            "confidence":    round(confidence, 1),
+            "status":        status,
+            "processedAt":   datetime.utcnow().isoformat() + "Z",
         }
 
+        logger.info(f"Result: status={status}, items={len(items)}, "
+                    f"types={summary['itemTypes']}, colors={summary['colors']}")
+
+        write_to_dynamo(user_id, result)
         return result
 
     except Exception as e:
+        logger.error(f"Pipeline error: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
