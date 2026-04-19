@@ -4,11 +4,7 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="9aab4476-17e5-4128-9620-54612dd92316" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/../AI_Pipeline.py/Drip_AI.py" beforeDir="false" afterPath="$PROJECT_DIR$/../AI_Pipeline.py/Drip_AI.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../rekognition-lambda/lambda_function.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/../rekognition-pipeline/lambda_function.py" beforeDir="false" />
-    </list>
+    <list default="true" id="9aab4476-17e5-4128-9620-54612dd92316" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -62,7 +58,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1776555680483</updated>
-      <workItem from="1776555681621" duration="2303000" />
+      <workItem from="1776555681621" duration="2739000" />
     </task>
     <servers />
   </component>
