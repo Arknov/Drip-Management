@@ -16,16 +16,23 @@ MODEL_ID = "gemini-1.5-flash"
 # -----------------------------
 
 def convert_lambda_items(lambda_result: dict) -> list:
-    """Converts lambda_handler output into dynamo_items format for generate_outfits"""
+    """Converts multi-image lambda_handler output into dynamo_items format for generate_outfits"""
     dynamo_items = []
 
-    for item in lambda_result.get("detectedItems", []):
-        item_type = item.get("itemType", "unknown")
-        colors = item.get("colors", [])
-        color = colors[0].lower() if colors else "unknown"
-        dynamo_items.append([item_type, color])
+    for result in lambda_result.get("results", []):
+        # skip any failed or rejected images
+        if result.get("status") != "success":
+            logger.warning(f"Skipping image {result.get('image')} — status: {result.get('status')}")
+            continue
+
+        for item in result.get("detectedItems", []):
+            item_type = item.get("itemType", "unknown")
+            colors = item.get("colors", [])
+            color = colors[0].lower() if colors else "unknown"
+            dynamo_items.append([item_type, color])
 
     return dynamo_items
+
 
 def normalize_wardrobe(dynamo_items: list) -> list:
     normalized = []
@@ -181,6 +188,21 @@ def generate_outfits(dynamo_items: list, preferences: dict) -> list:
 
 
 def run_pipeline(lambda_result: dict, preferences: dict) -> list:
-    """Single entry point — takes raw lambda output, returns outfits"""
+    """Single entry point — takes raw multi-image lambda output, returns outfits"""
+
+    processed = lambda_result.get("processed", 0)
+    failed    = lambda_result.get("failed", 0)
+
+    logger.info(f"Lambda processed {processed} images, {failed} failed")
+
+    if processed == 0:
+        logger.error("No images were successfully processed by Lambda")
+        return []
+
     dynamo_items = convert_lambda_items(lambda_result)
+
+    if not dynamo_items:
+        logger.error("No clothing items could be extracted from Lambda results")
+        return []
+
     return generate_outfits(dynamo_items, preferences)
